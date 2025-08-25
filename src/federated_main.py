@@ -27,11 +27,23 @@ if __name__ == '__main__':
     logger = SummaryWriter('../logs')
 
     args = args_parser()
-    exp_details(args)
+    # if args.gpu:
+    #     torch.cuda.set_device(args.gpu)
+    # device = 'cuda' if args.gpu else 'cpu'
 
-    if args.gpu_id:
-        torch.cuda.set_device(args.gpu_id)
-    device = 'cuda' if args.gpu else 'cpu'
+    if args.gpu is not None:
+        if torch.cuda.is_available():
+            # accept 0 or "cuda:0" or "0"
+            dev = int(args.gpu) if str(args.gpu).isdigit() else args.gpu
+            torch.cuda.set_device(dev if isinstance(dev, int) else dev)
+        else:
+            print("CUDA not available; falling back to CPU.")
+            args.gpu = None
+    
+    device = torch.device(f"cuda:{args.gpu}" if (args.gpu is not None and torch.cuda.is_available()) else "cpu")
+    print("DEVICE:", device)
+
+
 
     # load dataset and user groups
     train_dataset, test_dataset, user_groups = get_dataset(args)
@@ -61,6 +73,8 @@ if __name__ == '__main__':
     global_model.to(device)
     global_model.train()
     print(global_model)
+
+    print("Global model in: ", device)
 
     # copy weights
     global_weights = global_model.state_dict()
@@ -102,7 +116,7 @@ if __name__ == '__main__':
         global_model.eval()
         for c in range(args.num_users):
             local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[idx], logger=logger)
+                                      idxs=user_groups[c], logger=logger)
             acc, loss = local_model.inference(model=global_model)
             list_acc.append(acc)
             list_loss.append(loss)

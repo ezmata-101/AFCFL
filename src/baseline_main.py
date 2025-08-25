@@ -17,9 +17,23 @@ from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
 
 if __name__ == '__main__':
     args = args_parser()
-    if args.gpu:
-        torch.cuda.set_device(args.gpu)
-    device = 'cuda' if args.gpu else 'cpu'
+    # if args.gpu:
+    #     torch.cuda.set_device(args.gpu)
+    # device = 'cuda' if args.gpu else 'cpu'
+
+    if args.gpu is not None:
+        if torch.cuda.is_available():
+            # accept 0 or "cuda:0" or "0"
+            dev = int(args.gpu) if str(args.gpu).isdigit() else args.gpu
+            torch.cuda.set_device(dev if isinstance(dev, int) else dev)
+        else:
+            print("CUDA not available; falling back to CPU.")
+            args.gpu = None
+    
+    device = torch.device(f"cuda:{args.gpu}" if (args.gpu is not None and torch.cuda.is_available()) else "cpu")
+    print("DEVICE:", device)
+
+
 
     # load datasets
     train_dataset, test_dataset, _ = get_dataset(args)
