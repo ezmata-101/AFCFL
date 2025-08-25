@@ -59,5 +59,10 @@ def args_parser():
                         help='rounds of early stopping')
     parser.add_argument('--verbose', type=int, default=1, help='verbose')
     parser.add_argument('--seed', type=int, default=1, help='random seed')
+
+    parser.add_argument('--fcfl', type=int, default=0, help='whether to use FCFL')
+    parser.add_argument('--fcfl_alpha', type=float, default=0.5, help='the hyperparameter alpha in FCFL')
+    parser.add_argument('--fcfl_r', type=float, default=0.2, help='the random fraction r in FCFL client selection')
+
     args = parser.parse_args()
     return args
