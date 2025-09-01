@@ -62,7 +62,9 @@ def args_parser():
 
     parser.add_argument('--fcfl', type=int, default=0, help='whether to use FCFL')
     parser.add_argument('--fcfl_alpha', type=float, default=0.5, help='the hyperparameter alpha in FCFL')
-    parser.add_argument('--fcfl_r', type=float, default=0.2, help='the random fraction r in FCFL client selection')
+    parser.add_argument('--fcfl_r', type=float, default=0.8, help='the fraction r in FCFL client selection (8 of 10 clients will be based on Q values)')
+
+    parser.add_argument('--clients_per_round', type=int, default=None, help='Override number of clients per round m; if unset, use frac*num_users')
 
     args = parser.parse_args()
     return args
