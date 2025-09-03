@@ -65,7 +65,7 @@ def fairness_signal_gap(acc_vec: np.ndarray, gap_norm: float = 0.15) -> float:
 # ---------------------------
 # Adaptive alpha (modular)
 # ---------------------------
-# Internal shaping & smoothing constants (no flags)
+# Internal shaping & smoothing constants (kept as-is)
 _ALPHA_GAIN   = 1.0   # amplify unfairness
 _ALPHA_GAMMA  = 1.0   # concave boost (<1) for small signals
 _ALPHA_BETA   = 0.6   # EMA smoothing factor
@@ -145,10 +145,10 @@ def compute_round_weights(Q: np.ndarray, idxs_users: np.ndarray, n_i: np.ndarray
 
 
 # ======================================================================
-# Main (kept close to fcfl_main.py)
+# Main (kept close to your original, but structured per-epoch as requested)
 # ======================================================================
 if __name__ == '__main__':
-    # Reproducibility (optional)
+    # Reproducibility
     np.random.seed(42)
     torch.manual_seed(42)
 
@@ -161,11 +161,7 @@ if __name__ == '__main__':
     # ---------------------------
     args = args_parser()
 
-    # Only the minimal extra flags you asked for:
-    #   --fcfl_r
-    #   --fcfl_adaptive_alpha  (true/false)
-    #   --fcfl_alpha_min
-    #   --fcfl_alpha_max
+    # Minimal FCFL flags (unchanged)
     if not hasattr(args, 'fcfl'):
         args.fcfl = 1
     if not hasattr(args, 'fcfl_r'):
@@ -182,16 +178,14 @@ if __name__ == '__main__':
     args.fcfl_alpha_min = float(max(0.0, args.fcfl_alpha_min))
     args.fcfl_alpha_max = float(min(1.0, max(args.fcfl_alpha_min, args.fcfl_alpha_max)))
 
-    # Device
+    # Device (unchanged)
     if args.gpu is not None and torch.cuda.is_available():
         torch.cuda.set_device(int(args.gpu))
     else:
         args.gpu = None
     device = torch.device(f"cuda:{0 if args.gpu is None else args.gpu}" if torch.cuda.is_available() else "cpu")
     tqdm.write(f"DEVICE: {device}")
-
     args.device = device
-
 
     # ---------------------------
     # Data & model
@@ -225,7 +219,7 @@ if __name__ == '__main__':
     # FCFL server state
     # ---------------------------
     N = args.num_users
-    m = max(int(round(args.frac * N)), 1)  # keep like fcfl_main.py
+    m = max(int(round(args.frac * N)), 1)  # unchanged
 
     n_i = np.array([len(user_groups[i]) for i in range(N)], dtype=float)
 
@@ -248,52 +242,67 @@ if __name__ == '__main__':
     # Training rounds
     # ---------------------------
     for epoch in tqdm(range(args.epochs)):
-        # 1) Evaluate current global model on all clients (pre-update accuracies)
+        # ============================================================
+        # (A) Pre-round evaluation: client accuracies Acc_t (in [0,1])
+        # ============================================================
         Acc_t = np.zeros(N, dtype=float)
         for i in range(N):
             lu = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[i], logger=None)
             acc_i, _ = lu.inference(model=global_model)
-            Acc_t[i] = acc_i  # expected in [0,1]
+            Acc_t[i] = acc_i
 
-        # 2) Compute alpha (adaptive or fixed midpoint)
-        if args.fcfl_adaptive_alpha:
-            alpha_t, alpha_raw, g_out, g_shaped = compute_adaptive_alpha(
-                prev_alpha=alpha_t, acc_vec=Acc_t, epoch=epoch,
-                alpha_min=args.fcfl_alpha_min, alpha_max=args.fcfl_alpha_max
+        # ============================================================
+        # (B) Selection policy per your requested structure
+        # ============================================================
+        if bool(args.fcfl):
+            # ---- (1) Alpha handling ----
+            if args.fcfl_adaptive_alpha:
+                # calculate alpha's value
+                alpha_t, alpha_raw, g_out, g_shaped = compute_adaptive_alpha(
+                    prev_alpha=alpha_t, acc_vec=Acc_t, epoch=epoch,
+                    alpha_min=args.fcfl_alpha_min, alpha_max=args.fcfl_alpha_max
+                )
+            else:
+                # keep alpha constant (midpoint); still log fields
+                g_out = 0.0
+                g_shaped = 0.0
+                alpha_raw = alpha_t  # report the constant
+
+            tqdm.write(f"[Round {epoch+1:03d}] α(raw)={alpha_raw:.4f}, α(t)={alpha_t:.4f}, signal={g_out:.4f}, shaped={g_shaped:.4f}")
+
+            # ---- (2) Calculate/update Q values ----
+            if epoch > 0:
+                u_ft = np.maximum(Acc_hat_t - Acc_t, 0.0)             # unfairness per client
+                Q = np.maximum(Q + alpha_t * u_ft - omega * x_prev, 0.0)
+
+            # ---- (3) Selection: by Q + random remainder ----
+            cold_start = (epoch == 0 and np.allclose(Q, 0))
+            idxs_users, selected_by_Q, selected_random = select_clients(
+                Q=Q, N=N, m=m, fcfl_enabled=True, fcfl_r=float(args.fcfl_r), cold_start=cold_start
             )
+
         else:
-            # Use fixed midpoint of the provided min/max
-            g_out = 0.0
-            g_shaped = 0.0
-            alpha_raw = alpha_t  # keep reporting the constant
-            # alpha_t remains constant (midpoint)
+            # FCFL disabled → select clients randomly (vanilla FedAvg)
+            alpha_raw, g_out, g_shaped = alpha_t, 0.0, 0.0  # just for log shape consistency
+            idxs_users = np.sort(np.random.choice(range(N), m, replace=False))
+            selected_by_Q = np.array([], dtype=int)
+            selected_random = idxs_users.copy()
 
-        tqdm.write(f"[Round {epoch+1:03d}] α(raw)={alpha_raw:.4f}, α(t)={alpha_t:.4f}, signal={g_out:.4f}, shaped={g_shaped:.4f}")
-
-        # 3) Update Q (skip at cold start)
-        if args.fcfl and epoch > 0:
-            u_ft = np.maximum(Acc_hat_t - Acc_t, 0.0)             # unfairness level per client
-            Q = np.maximum(Q + alpha_t * u_ft - omega * x_prev, 0.0)
-
-        # ---- PRINT full Q values (sorted desc) ----
-        q_pairs = [(int(i), float(Q[i])) for i in range(N)]
-        q_pairs_sorted = sorted(q_pairs, key=lambda x: x[1], reverse=True)
+        # ---- Print Q & selection info for this round ----
+        q_pairs_sorted = sorted([(int(i), float(Q[i])) for i in range(N)], key=lambda x: x[1], reverse=True)
         tqdm.write(f"[Round {epoch+1:03d}] Q per client (desc): {q_pairs_sorted}")
-
-        # 4) Select m clients
-        cold_start = (epoch == 0 and np.allclose(Q, 0))
-        idxs_users, selected_by_Q, selected_random = select_clients(
-            Q=Q, N=N, m=m, fcfl_enabled=bool(args.fcfl), fcfl_r=float(args.fcfl_r), cold_start=cold_start
-        )
-        if cold_start or (not args.fcfl):
-            tqdm.write(f"[Round {epoch+1:03d}] selected_by_Q   (0): []")
-        else:
+        if len(selected_by_Q) > 0:
             tqdm.write(f"[Round {epoch+1:03d}] m={m}, fcfl_r={args.fcfl_r} → by_Q={len(selected_by_Q)}, random={len(selected_random)}")
             tqdm.write(f"[Round {epoch+1:03d}] selected_by_Q   ({len(selected_by_Q)}): {selected_by_Q.tolist()}")
+        else:
+            tqdm.write(f"[Round {epoch+1:03d}] selected_by_Q   (0): []")
         tqdm.write(f"[Round {epoch+1:03d}] selected_random ({len(selected_random)}): {selected_random.tolist()}")
         tqdm.write(f"[Round {epoch+1:03d}] selected_all    ({len(idxs_users)}): {idxs_users.tolist()}")
 
-        # 5) Aggregation weights
+        # ============================================================
+        # (C) Do other tasks: weights, local training, aggregation
+        # ============================================================
+        # (C1) Aggregation weights for this round
         w_sel = compute_round_weights(Q=Q, idxs_users=idxs_users, n_i=n_i)
         order = np.argsort(idxs_users)
         weights_pairs = [(int(idxs_users[o]), float(w_sel[o])) for o in order]
@@ -301,7 +310,7 @@ if __name__ == '__main__':
         tqdm.write(f"[Round {epoch+1:03d}] agg weights (id, weight): {weights_pairs}")
         tqdm.write(f"[Round {epoch+1:03d}] Q(selected)           : {q_selected_pairs}")
 
-        # log to TSV (includes alpha info)
+        # (C2) Log round snapshot to TSV
         with open('../logs/fcfl_round_log.tsv', 'a') as f:
             sel_all_sorted = idxs_users[order]
             w_sorted = w_sel[order]
@@ -317,13 +326,13 @@ if __name__ == '__main__':
                 f"{','.join(f'{float(q):.6f}' for q in q_sel_sorted)}\n"
             )
 
-        # Update omega/x_prev for penalty next round
+        # (C3) Prepare penalty terms for next round
         omega = np.zeros(N, dtype=float)
         omega[idxs_users] = w_sel
         x_prev = np.zeros(N, dtype=int)
         x_prev[idxs_users] = 1
 
-        # 6) Local training
+        # (C4) Local training on selected clients
         local_weights, client_ids, local_train_acc = [], [], []
         local_losses = []
         for cid in idxs_users:
@@ -339,15 +348,15 @@ if __name__ == '__main__':
             client_ids.append(cid)
             local_train_acc.append(acc_i)
 
-        # 7) Aggregate
+        # (C5) Aggregate global model
         weights_map = {cid: float(w) for cid, w in zip(client_ids, w_sel)}
         global_weights = weighted_average_weights(local_weights, client_ids, weights_map)
         global_model.load_state_dict(global_weights)
 
-        # 8) Estimate global acc for next round
+        # (C6) Estimate global acc for next round (for unfairness)
         Acc_hat_t = float(np.sum(w_sel * np.array(local_train_acc))) if len(local_train_acc) else 0.0
 
-        # Logs
+        # (C7) Track training curves
         loss_avg = float(np.mean(local_losses)) if len(local_losses) else 0.0
         train_loss.append(loss_avg)
         train_accuracy.append(float(np.mean(Acc_t)))
