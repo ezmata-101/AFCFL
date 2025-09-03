@@ -47,7 +47,7 @@ def args_parser():
                         of dataset")
     parser.add_argument('--num_classes', type=int, default=10, help="number \
                         of classes")
-    parser.add_argument('--gpu', type=int, default=None, help='GPU id (e.g., 0). Omit for CPU.')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU id (e.g., 0). Omit for CPU.')
     parser.add_argument('--optimizer', type=str, default='sgd', help="type \
                         of optimizer")
     parser.add_argument('--iid', type=int, default=1,
@@ -65,6 +65,13 @@ def args_parser():
     parser.add_argument('--fcfl_r', type=float, default=0.8, help='the fraction r in FCFL client selection (8 of 10 clients will be based on Q values)')
 
     parser.add_argument('--clients_per_round', type=int, default=None, help='Override number of clients per round m; if unset, use frac*num_users')
+
+    # for adaptive alpha in FCFL
+    parser.add_argument('--fcfl_adaptive_alpha', type=bool, default=False, help='whether to use adaptive alpha in FCFL')
+    parser.add_argument('--fcfl_alpha_min', type=float, default=0.1, help='the minimum value of adaptive alpha')
+    parser.add_argument('--fcfl_alpha_max', type=float, default=1.0, help='the maximum value of adaptive alpha')
+    parser.add_argument('--fcfl_alpha_beta', type=float, default=0.9, help='the smoothing parameter of adaptive alpha')
+    parser.add_argument('--fcfl_alpha_warmup', type=float, default=0, help='the number of warmup rounds for adaptive alpha')
 
     args = parser.parse_args()
     return args

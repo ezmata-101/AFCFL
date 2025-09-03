@@ -51,9 +51,15 @@ class LocalUpdate(object):
         self.idxs = list(idxs)
 
         # Choose device once per client
-        self.device = torch.device(
-            f"cuda:{args.gpu}" if (args.gpu is not None and torch.cuda.is_available()) else "cpu"
-        )
+        if hasattr(self.args, "device"):
+            self.device = self.args.device
+        else:
+            gpu_id = getattr(self.args, "gpu", None)
+            if torch.cuda.is_available():
+                self.device = torch.device(f"cuda:{gpu_id}" if gpu_id is not None else "cuda")
+            else:
+                self.device = torch.device("cpu")
+
 
         # Build loaders from the provided indices
         self.trainloader, self.validloader, self.testloader = self.train_val_test(self.dataset, self.idxs)
