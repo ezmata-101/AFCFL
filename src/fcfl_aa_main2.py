@@ -236,7 +236,9 @@ if __name__ == '__main__':
             Acc_t = np.zeros(N, dtype=float)
             for i in range(N):
                 lu = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[i], logger=None)
-                acc_i, _ = lu.inference(model=global_model)
+                # === SPEED: inference does not need gradients ===
+                with torch.no_grad():
+                    acc_i, _ = lu.inference(model=global_model)
                 Acc_t[i] = acc_i
 
             mean_acc = float(np.mean(Acc_t))
@@ -302,7 +304,9 @@ if __name__ == '__main__':
 
                 tmp = copy.deepcopy(global_model)
                 tmp.load_state_dict(w_i)
-                acc_i, _ = lu.inference(model=tmp)
+                # === SPEED: inference does not need gradients ===
+                with torch.no_grad():
+                    acc_i, _ = lu.inference(model=tmp)
 
                 local_weights.append(w_i)
                 client_ids.append(cid)
@@ -349,14 +353,18 @@ if __name__ == '__main__':
     # ---------------------------
     # Final test & run summary (minimal prints)
     # ---------------------------
-    test_acc, test_loss = test_inference(args, global_model, test_dataset)
+    # (No change to test_inference itself; wrap in no_grad to skip autograd bookkeeping)
+    with torch.no_grad():
+        test_acc, test_loss = test_inference(args, global_model, test_dataset)
 
     # Final variance from last epoch’s Acc_t is not available here directly; recompute once:
     # (This is cheap and ensures we report the same metric at the end.)
     Acc_t_final = np.zeros(N, dtype=float)
     for i in range(N):
         lu = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[i], logger=None)
-        acc_i, _ = lu.inference(model=global_model)
+        # === SPEED: inference does not need gradients ===
+        with torch.no_grad():
+            acc_i, _ = lu.inference(model=global_model)
         Acc_t_final[i] = acc_i
     final_var = float(np.var(Acc_t_final))
 
@@ -410,9 +418,3 @@ if __name__ == '__main__':
         if write_header:
             writer.writeheader()
         writer.writerow(summary_row)
-
-
-
-
-
-
