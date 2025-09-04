@@ -8,7 +8,6 @@ import csv
 from datetime import datetime
 import pickle
 import numpy as np
-# tqdm kept for compatibility; we suppress noisy per-epoch prints by default
 from tqdm import tqdm
 
 import torch
@@ -48,10 +47,10 @@ def weighted_average_weights(local_weights, client_ids, weights_map):
 # Fairness signal (no Jain): accuracy gap
 # g_t ∈ [0,1], higher => less fair
 # ---------------------------
-def fairness_signal_gap(acc_vec: np.ndarray, gap_norm: float = 0.15) -> float:
+def fairness_signal_gap(acc_vec: np.ndarray, gap_norm: float = 0.15):
     acc = np.asarray(acc_vec, dtype=float)
     if acc.size == 0:
-        return 0.0
+        return 0.0, 0.0
     gap = float(np.mean(acc) - np.min(acc))
     g = gap / max(1e-12, gap_norm)
     return float(np.clip(g, 0.0, 1.0)), float(gap)
@@ -76,7 +75,7 @@ def compute_adaptive_alpha(prev_alpha: float,
                            epoch: int,
                            alpha_min: float,
                            alpha_max: float):
-    g_t, gap_raw = fairness_signal_gap(acc_vec, gap_norm=0.15)  # normalized in [0,1], gap_raw = mean-min
+    g_t, gap_raw = fairness_signal_gap(acc_vec, gap_norm=0.15)
     g_shaped = _shape_signal(g_t)
     alpha_raw = alpha_min + (alpha_max - alpha_min) * g_shaped
     if epoch < _ALPHA_WARMUP:
@@ -97,8 +96,13 @@ def select_clients(Q: np.ndarray, N: int, m: int, fcfl_enabled: bool, fcfl_r: fl
         sel_rand = idxs_users.copy()
         return idxs_users, sel_by_q, sel_rand
 
-    k_q = int(np.round(float(fcfl_r) * m))
-    k_q = max(0, min(k_q, m))
+    # Use floor and force k_q < m for m>1 (avoid all-Q)
+    k_q = int(np.floor(float(fcfl_r) * m + 1e-12))
+    if m > 1:
+        k_q = min(k_q, m - 1)
+    else:
+        k_q = 0
+    k_q = max(0, k_q)
     k_rand = m - k_q
 
     all_ids = np.arange(N, dtype=int)
@@ -149,13 +153,28 @@ if __name__ == '__main__':
         args.fcfl_alpha_min = 0.10
     if not hasattr(args, 'fcfl_alpha_max'):
         args.fcfl_alpha_max = 0.80
-    # NEW optional flag to print Q and selections per epoch
     if not hasattr(args, 'fcfl_print_selection'):
         args.fcfl_print_selection = False
 
+    # NEW: adaptive r defaults
+    if not hasattr(args, 'fcfl_adaptive_r'):
+        args.fcfl_adaptive_r = False
+    if not hasattr(args, 'fcfl_r_min'):
+        args.fcfl_r_min = 0.20
+    if not hasattr(args, 'fcfl_r_max'):
+        args.fcfl_r_max = 0.95
+
+    # Parse/clip
     args.fcfl_r = float(np.clip(args.fcfl_r, 0.0, 1.0))
     args.fcfl_adaptive_alpha = parse_bool(args.fcfl_adaptive_alpha)
     args.fcfl_print_selection = parse_bool(args.fcfl_print_selection)
+    args.fcfl_adaptive_r = parse_bool(args.fcfl_adaptive_r)
+
+    args.fcfl_r_min = float(np.clip(args.fcfl_r_min, 0.0, 1.0))
+    args.fcfl_r_max = float(np.clip(args.fcfl_r_max, 0.0, 1.0))
+    if args.fcfl_r_min > args.fcfl_r_max:
+        args.fcfl_r_min, args.fcfl_r_max = args.fcfl_r_max, args.fcfl_r_min
+
     args.fcfl_alpha_min = float(max(0.0, args.fcfl_alpha_min))
     args.fcfl_alpha_max = float(min(1.0, max(args.fcfl_alpha_min, args.fcfl_alpha_max)))
 
@@ -208,16 +227,23 @@ if __name__ == '__main__':
     # alpha initialization
     alpha_t = 0.5 * (args.fcfl_alpha_min + args.fcfl_alpha_max)
 
+    # r state (EMA)
+    r_t = float(args.fcfl_r)
+    R_EMA = 0.10  # smoothing for adaptive r
+
     # ---------------------------
     # Run CSV logger
     # ---------------------------
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_name = f"log_{ts}_dataset_{args.dataset}_model_{args.model}_users[{args.num_users}]_frac[{args.frac}]_fcfl[{int(bool(args.fcfl))}]_aa[{int(bool(args.fcfl_adaptive_alpha))}]_alpha[{args.fcfl_alpha}]_alpha_min[{args.fcfl_alpha_min}]_alpha_max[{args.fcfl_alpha_max}]_r[{args.fcfl_r}]_m[{m}]_E[{args.epochs}]_Le[{args.local_ep}]_B[{args.local_bs}]_lr[{args.lr}]_mom[{args.momentum}]_opt[{args.optimizer}]_iid[{args.iid}]_unequal[{args.unequal}]_seed[{args.seed}]_cpr[{args.clients_per_round}]_training.csv"
+    log_name = f"log_{ts}_dataset_{args.dataset}_model_{args.model}_users[{args.num_users}]_frac[{args.frac}]_fcfl[{int(bool(args.fcfl))}]_aa[{int(bool(args.fcfl_adaptive_alpha))}]_alpha[{getattr(args,'fcfl_alpha',alpha_t)}]_alpha_min[{args.fcfl_alpha_min}]_alpha_max[{args.fcfl_alpha_max}]_r[{args.fcfl_r}]_m[{m}]_E[{args.epochs}]_Le[{args.local_ep}]_B[{args.local_bs}]_lr[{args.lr}]_mom[{args.momentum}]_opt[{args.optimizer}]_iid[{args.iid}]_unequal[{args.unequal}]_seed[{args.seed}]_cpr[{args.clients_per_round}]_ar[{args.fcfl_adaptive_r}]_training.csv"
+    print(f"Logging to {log_name}")
     log_path = os.path.join("../logs", log_name)
+
+    print(f"Starting training: fcfl={args.fcfl}, aa={args.fcfl_adaptive_alpha}, "
+          f"alpha_min={args.fcfl_alpha_min}, alpha_max={args.fcfl_alpha_max}, r={args.fcfl_r}")
 
     with open(log_path, "w", newline="") as fcsv:
         writer = csv.writer(fcsv)
-        # Header (keep compact but informative)
         writer.writerow([
             "epoch", "mean_acc", "best10_mean", "worst10_mean",
             "unfairness_gap", "unfairness_signal",
@@ -245,40 +271,59 @@ if __name__ == '__main__':
             worst10 = float(np.mean(np.partition(Acc_t, k-1)[:k]))
             best10  = float(np.mean(np.partition(Acc_t, -k)[-k:]))
 
+            # Always compute fairness signal for both alpha and r logic
+            g_norm, gap_raw = fairness_signal_gap(Acc_t, gap_norm=0.15)
+            g_shaped = _shape_signal(g_norm)
+
             # (B) FCFL policy branch
             if bool(args.fcfl):
+                # --- alpha branch ---
                 if args.fcfl_adaptive_alpha:
                     alpha_t, alpha_raw, g_norm, g_shaped, gap_raw = compute_adaptive_alpha(
                         prev_alpha=alpha_t, acc_vec=Acc_t, epoch=epoch,
                         alpha_min=args.fcfl_alpha_min, alpha_max=args.fcfl_alpha_max
                     )
                 else:
-                    # constant alpha at current value; still compute gap for logging
-                    g_norm, gap_raw = fairness_signal_gap(Acc_t, gap_norm=0.15)
-                    g_shaped = _shape_signal(g_norm)
-                    alpha_raw = alpha_t
+                    # freeze alpha at provided value (clipped)
+                    alpha_const = float(np.clip(getattr(args, "fcfl_alpha", alpha_t),
+                                                args.fcfl_alpha_min, args.fcfl_alpha_max))
+                    alpha_t = alpha_const
+                    alpha_raw = alpha_const  # for logging
 
                 # Update queues (skip cold start)
                 if epoch > 0:
                     u_ft = np.maximum(Acc_hat_t - Acc_t, 0.0)
                     Q = np.maximum(Q + alpha_t * u_ft - omega * x_prev, 0.0)
 
+                # --- r branch ---
+                if args.fcfl_adaptive_r:
+                    r_target = args.fcfl_r_min + (args.fcfl_r_max - args.fcfl_r_min) * float(g_shaped)
+                    r_target = float(np.clip(r_target, args.fcfl_r_min, args.fcfl_r_max))
+                    r_t = (1.0 - R_EMA) * r_t + R_EMA * r_target
+                else:
+                    r_t = float(args.fcfl_r)
+
+                # Effective r used by selection (never allow all-Q when m>1)
+                r_cap_eff = (m - 1) / max(1.0, m) if m > 1 else args.fcfl_r_max
+                r_eff = float(np.clip(r_t, args.fcfl_r_min, min(args.fcfl_r_max, r_cap_eff)))
+                logged_r = r_eff
+
                 cold_start = (epoch == 0 and np.allclose(Q, 0))
                 idxs_users, selected_by_Q, selected_random = select_clients(
-                    Q=Q, N=N, m=m, fcfl_enabled=True, fcfl_r=float(args.fcfl_r), cold_start=cold_start
+                    Q=Q, N=N, m=m, fcfl_enabled=True, fcfl_r=r_eff, cold_start=cold_start
                 )
             else:
                 # Vanilla FedAvg
-                g_norm, gap_raw = fairness_signal_gap(Acc_t, gap_norm=0.15)
-                g_shaped = _shape_signal(g_norm)
-                alpha_raw = alpha_t  # not used, but logged
                 idxs_users = np.sort(np.random.choice(range(N), m, replace=False))
                 selected_by_Q = np.array([], dtype=int)
                 selected_random = idxs_users.copy()
+                alpha_raw = alpha_t  # not used, but logged
+                logged_r = 0.0
 
-            # Optional per-epoch prints (suppressed unless flag set)
+            # Optional per-epoch prints (only if flag set)
             if args.fcfl_print_selection:
-                q_pairs_sorted = sorted([(int(i), float(Q[i])) for i in range(N)], key=lambda x: x[1], reverse=True)
+                q_pairs_sorted = sorted([(int(i), float(Q[i])) for i in range(N)],
+                                        key=lambda x: x[1], reverse=True)
                 print(f"[Round {epoch+1:03d}] Q (desc): {q_pairs_sorted}")
                 print(f"[Round {epoch+1:03d}] selected_by_Q({len(selected_by_Q)}): {selected_by_Q.tolist()}")
                 print(f"[Round {epoch+1:03d}] selected_random({len(selected_random)}): {selected_random.tolist()}")
@@ -323,10 +368,10 @@ if __name__ == '__main__':
                 best10,
                 worst10,
                 gap_raw,
-                g_norm,         # normalized unfairness signal used for alpha
+                g_norm,         # normalized unfairness signal used for alpha/r mapping
                 alpha_t if bool(args.fcfl) else 0.0,
                 alpha_raw if bool(args.fcfl) else 0.0,
-                float(args.fcfl_r),
+                float(logged_r),
                 var_acc,
                 float(np.mean(Q)),
                 float(np.std(Q)),
@@ -340,10 +385,10 @@ if __name__ == '__main__':
 
             print(f"Round {epoch+1:03d}: Mean Acc: {mean_acc*100:.2f}%, "
                   f"Best10: {best10*100:.2f}%, Worst10: {worst10*100:.2f}%, "
-                    f"Gap: {gap_raw*100:.2f}%, Var: {var_acc:.6f}, "
-                    f"alpha: {alpha_t:.4f}, r: {args.fcfl_r}, "
-                    f"Q: [μ:{np.mean(Q):.4f},σ:{np.std(Q):.4f},min:{np.min(Q):.4f},max:{np.max(Q):.4f}]"
-                    )
+                  f"Gap: {gap_raw*100:.2f}%, Var: {var_acc:.6f}, "
+                  f"alpha: {alpha_t:.4f}, r_used: {logged_r:.3f}, "
+                  f"Q: [μ:{np.mean(Q):.4f},σ:{np.std(Q):.4f},min:{np.min(Q):.4f},max:{np.max(Q):.4f}]"
+                  )
 
 
     # ---------------------------
@@ -351,8 +396,7 @@ if __name__ == '__main__':
     # ---------------------------
     test_acc, test_loss = test_inference(args, global_model, test_dataset)
 
-    # Final variance from last epoch’s Acc_t is not available here directly; recompute once:
-    # (This is cheap and ensures we report the same metric at the end.)
+    # Final variance (recompute once at the end)
     Acc_t_final = np.zeros(N, dtype=float)
     for i in range(N):
         lu = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[i], logger=None)
@@ -360,11 +404,12 @@ if __name__ == '__main__':
         Acc_t_final[i] = acc_i
     final_var = float(np.var(Acc_t_final))
 
-    # Print only the summary you asked for
+    # Print summary
     print("\n=== RUN SUMMARY ===")
     print(f"Log file         : {log_path}")
     print(f"Flags            : fcfl={args.fcfl}, aa={args.fcfl_adaptive_alpha}, "
-          f"alpha_min={args.fcfl_alpha_min}, alpha_max={args.fcfl_alpha_max}, r={args.fcfl_r}, "
+          f"alpha_min={args.fcfl_alpha_min}, alpha_max={args.fcfl_alpha_max}, "
+          f"r0={args.fcfl_r}, r_min={args.fcfl_r_min}, r_max={args.fcfl_r_max}, "
           f"frac={args.frac}, m={m}, users={args.num_users}, dataset={args.dataset}, model={args.model}, epochs={args.epochs}")
     print(f"Test accuracy    : {100.0*test_acc:.2f}%")
     print(f"Final variance   : {final_var:.6f}")
@@ -376,8 +421,8 @@ if __name__ == '__main__':
     summary_path = os.path.join("../logs", "summary.csv")
     
     summary_row = {
-        "run_log": log_path,                                 # filename (full path)
-        "run_log_basename": os.path.basename(log_path),      # filename (basename)
+        "run_log": log_path,
+        "run_log_basename": os.path.basename(log_path),
         "dataset": args.dataset,
         "model": args.model,
         "num_users": args.num_users,
@@ -402,7 +447,6 @@ if __name__ == '__main__':
         "duration_sec": f"{duration_s:.3f}",
     }
 
-    # Append (create with header if missing)
     os.makedirs("../logs", exist_ok=True)
     write_header = not os.path.exists(summary_path)
     with open(summary_path, "a", newline="") as fsum:
@@ -410,9 +454,3 @@ if __name__ == '__main__':
         if write_header:
             writer.writeheader()
         writer.writerow(summary_row)
-
-
-
-
-
-
