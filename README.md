@@ -1,4 +1,4 @@
-# AFCFL — Adaptive Fairness Compensation for Federated Learning
+# AFCFL — Adaptive Fairness Compensation-based Federated Learning
 
 #### Video Demonstration: https://youtu.be/kH8LLVZwAFE
 
